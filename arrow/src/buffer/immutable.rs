@@ -25,6 +25,7 @@ use crate::util::bit_chunk_iterator::{BitChunks, UnalignedBitChunk};
 use crate::{
     bytes::{Bytes, Deallocation},
     datatypes::ArrowNativeType,
+    ffi,
 };
 
 use super::ops::bitwise_unary_op_helper;
@@ -85,13 +86,14 @@ impl Buffer {
     ///
     /// * `ptr` - Pointer to raw parts
     /// * `len` - Length of raw parts in **bytes**
+    /// * `data` - An [ffi::FFI_ArrowArray] with the data
     ///
     /// # Safety
     ///
     /// This function is unsafe as there is no guarantee that the given pointer is valid for `len`
     /// bytes and that the foreign deallocator frees the region.
-    pub unsafe fn from_unowned(ptr: NonNull<u8>, len: usize) -> Self {
-        Buffer::build_with_arguments(ptr, len, Deallocation::Foreign)
+    pub unsafe fn from_unowned(ptr: NonNull<u8>, len: usize, data: Arc<Box<ffi::FFI_ArrowArray>>,) -> Self {
+        Buffer::build_with_arguments(ptr, len, Deallocation::Foreign(data))
     }
 
     /// Auxiliary method to create a new Buffer

@@ -496,6 +496,7 @@ impl FFI_ArrowArray {
 /// # Safety
 /// This function assumes that `ceil(self.length * bits, 8)` is the size of the buffer
 unsafe fn create_buffer(
+    owner: Arc<Box<FFI_ArrowArray>>,
     array: &FFI_ArrowArray,
     index: usize,
     len: usize,
@@ -508,15 +509,15 @@ unsafe fn create_buffer(
     assert!(index < array.n_buffers as usize);
     let ptr = *buffers.add(index);
 
-    NonNull::new(ptr as *mut u8).map(|ptr| Buffer::from_unowned(ptr, len))
+    NonNull::new(ptr as *mut u8).map(|ptr| Buffer::from_unowned(ptr, len, owner))
 }
 
-fn create_child<'a>(
-    owner: &'a FFI_ArrowArray,
-    array: &'a FFI_ArrowArray,
-    schema: &'a FFI_ArrowSchema,
+fn create_child(
+    owner: Arc<Box<FFI_ArrowArray>>,
+    array: &FFI_ArrowArray,
+    schema: & FFI_ArrowSchema,
     index: usize,
-) -> ArrowArrayChild<'a> {
+) -> ArrowArrayChild<'static> {
     assert!(index < array.n_children as usize);
     assert!(!array.children.is_null());
     assert!(!array.children.is_null());
@@ -578,7 +579,7 @@ pub trait ArrowArrayRef {
 
                 let len = self.buffer_len(index)?;
 
-                unsafe { create_buffer(self.array(), index, len) }.ok_or_else(|| {
+                unsafe { create_buffer(self.owner().clone(), self.array(), index, len) }.ok_or_else(|| {
                     ArrowError::CDataInterface(format!(
                         "The external buffer at position {} is null.",
                         index - 1
@@ -654,14 +655,14 @@ pub trait ArrowArrayRef {
         // similar to `self.buffer_len(0)`, but without `Result`.
         let buffer_len = bit_util::ceil(self.array().length as usize, 8);
 
-        unsafe { create_buffer(self.array(), 0, buffer_len) }
+        unsafe { create_buffer(self.owner().clone(), self.array(), 0, buffer_len) }
     }
 
     fn child(&self, index: usize) -> ArrowArrayChild {
-        create_child(&self.owner(), self.array(), self.schema(), index)
+        create_child(self.owner().clone(), self.array(), self.schema(), index)
     }
 
-    fn owner(&self) -> Arc<&FFI_ArrowArray>;
+    fn owner(&self) -> &Arc<Box<FFI_ArrowArray>>;
     fn array(&self) -> &FFI_ArrowArray;
     fn schema(&self) -> &FFI_ArrowSchema;
     fn data_type(&self) -> Result<DataType>;
@@ -673,7 +674,7 @@ pub trait ArrowArrayRef {
                 Some(ArrowArrayChild::from_raw(
                     &*self.array().dictionary,
                     &*self.schema().dictionary,
-                    &self.owner(),
+                    self.owner().clone(),
                 ))
             } else {
                 None
@@ -704,21 +705,21 @@ pub trait ArrowArrayRef {
 /// Furthermore, this struct assumes that the incoming data agrees with the C data interface.
 #[derive(Debug)]
 pub struct ArrowArray {
-    array: Box<FFI_ArrowArray>,
-    schema: Box<FFI_ArrowSchema>,
+    array: Arc<Box<FFI_ArrowArray>>,
+    schema: Arc<Box<FFI_ArrowSchema>>,
 }
 
 #[derive(Debug)]
 pub struct ArrowArrayChild<'a> {
     array: &'a FFI_ArrowArray,
     schema: &'a FFI_ArrowSchema,
-    owner: &'a FFI_ArrowArray,
+    owner: Arc<Box<FFI_ArrowArray>>,
 }
 
 impl ArrowArrayRef for ArrowArray {
     /// the data_type as declared in the schema
     fn data_type(&self) -> Result<DataType> {
-        DataType::try_from(self.schema.as_ref())
+        DataType::try_from((*self.schema).as_ref())
     }
 
     fn array(&self) -> &FFI_ArrowArray {
@@ -726,11 +727,11 @@ impl ArrowArrayRef for ArrowArray {
     }
 
     fn schema(&self) -> &FFI_ArrowSchema {
-        self.schema.as_ref()
+        (*self.schema).as_ref()
     }
 
-    fn owner(&self) -> Arc<&FFI_ArrowArray> {
-        Arc::new(self.array.as_ref())
+    fn owner(&self) -> &Arc<Box<FFI_ArrowArray>> {
+        &self.array
     }
 }
 
@@ -748,8 +749,8 @@ impl<'a> ArrowArrayRef for ArrowArrayChild<'a> {
         self.schema
     }
 
-    fn owner(&self) -> Arc<&FFI_ArrowArray> {
-        Arc::new(self.owner)
+    fn owner(&self) -> &Arc<Box<FFI_ArrowArray>> {
+        &self.owner
     }
 }
 
@@ -759,8 +760,8 @@ impl ArrowArray {
     /// See safety of [ArrowArray]
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn try_new(data: ArrayData) -> Result<Self> {
-        let array = Box::new(FFI_ArrowArray::new(&data));
-        let schema = Box::new(FFI_ArrowSchema::try_from(data.data_type())?);
+        let array = Arc::new(Box::new(FFI_ArrowArray::new(&data)));
+        let schema = Arc::new(Box::new(FFI_ArrowSchema::try_from(data.data_type())?));
         Ok(ArrowArray { array, schema })
     }
 
@@ -780,8 +781,8 @@ impl ArrowArray {
             ));
         };
         Ok(Self {
-            array: Box::from_raw(array as *mut FFI_ArrowArray),
-            schema: Box::from_raw(schema as *mut FFI_ArrowSchema),
+            array: Arc::new(Box::from_raw(array as *mut FFI_ArrowArray)),
+            schema: Arc::new(Box::from_raw(schema as *mut FFI_ArrowSchema)),
         })
     }
 
@@ -789,14 +790,14 @@ impl ArrowArray {
     /// # Safety
     /// See safety of [ArrowArray]
     pub unsafe fn empty() -> Self {
-        let schema = Box::new(FFI_ArrowSchema::empty());
-        let array = Box::new(FFI_ArrowArray::empty());
+        let schema = Arc::new(Box::new(FFI_ArrowSchema::empty()));
+        let array = Arc::new(Box::new(FFI_ArrowArray::empty()));
         ArrowArray { array, schema }
     }
 
     /// exports [ArrowArray] to the C Data Interface
     pub fn into_raw(this: ArrowArray) -> (*const FFI_ArrowArray, *const FFI_ArrowSchema) {
-        (Box::into_raw(this.array), Box::into_raw(this.schema))
+        (Box::into_raw(*this.array), Box::into_raw(*this.schema))
     }
 }
 
@@ -804,7 +805,7 @@ impl<'a> ArrowArrayChild<'a> {
     fn from_raw(
         array: &'a FFI_ArrowArray,
         schema: &'a FFI_ArrowSchema,
-        owner: &'a FFI_ArrowArray,
+        owner: Arc<Box<FFI_ArrowArray>>,
     ) -> Self {
         Self {
             array,
@@ -836,7 +837,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -863,7 +864,7 @@ mod tests {
         let array = ArrowArray::try_from(original_array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -886,7 +887,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -958,7 +959,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // downcast
@@ -998,7 +999,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -1043,7 +1044,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -1069,7 +1070,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -1105,7 +1106,7 @@ mod tests {
         let array = ArrowArray::try_from(array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation
@@ -1142,7 +1143,7 @@ mod tests {
         let array = ArrowArray::try_from(dict_array.data().clone())?;
 
         // (simulate consumer) import it
-        let data = ArrayData::try_from(&array)?;
+        let data = ArrayData::try_from(array)?;
         let array = make_array(data);
 
         // perform some operation

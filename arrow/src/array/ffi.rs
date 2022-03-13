@@ -27,10 +27,10 @@ use crate::{
 
 use super::ArrayData;
 
-impl TryFrom<&ffi::ArrowArray> for ArrayData {
+impl TryFrom<ffi::ArrowArray> for ArrayData {
     type Error = ArrowError;
 
-    fn try_from(value: &ffi::ArrowArray) -> Result<Self> {
+    fn try_from(value: ffi::ArrowArray) -> Result<Self> {
         value.to_data()
     }
 }
@@ -69,7 +69,7 @@ mod tests {
         // simulate an external consumer by being the consumer
         let d1 = unsafe { ArrowArray::try_from_raw(array, schema) }?;
 
-        let result = &ArrayData::try_from(&d1)?;
+        let result = &ArrayData::try_from(d1)?;
 
         assert_eq!(result, expected);
         Ok(())

@@ -26,7 +26,7 @@
 //!
 //! ```rust
 //! # use std::sync::Arc;
-//! # use arrow::array::{Int32Array, Array, ArrayData, make_array_from_raw};
+//! # use arrow::array::{Int32Array, Array, ArrayData, make_array_from_arc_raw};
 //! # use arrow::error::{Result, ArrowError};
 //! # use arrow::compute::kernels::arithmetic;
 //! # use std::convert::TryFrom;
@@ -40,7 +40,7 @@
 //! // consumed and used by something else...
 //!
 //! // import it
-//! let array = unsafe { make_array_from_raw(array_ptr, schema_ptr)? };
+//! let array = unsafe { make_array_from_arc_raw(array_ptr, schema_ptr)? };
 //!
 //! // perform some operation
 //! let array = array.as_any().downcast_ref::<Int32Array>().ok_or(
@@ -107,7 +107,7 @@ bitflags! {
 /// See <https://arrow.apache.org/docs/format/CDataInterface.html#structure-definitions>
 /// This was created by bindgen
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FFI_ArrowSchema {
     format: *const c_char,
     name: *const c_char,
@@ -336,7 +336,7 @@ fn bit_width(data_type: &DataType, i: usize) -> Result<usize> {
 /// See <https://arrow.apache.org/docs/format/CDataInterface.html#structure-definitions>
 /// This was created by bindgen
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FFI_ArrowArray {
     pub(crate) length: i64,
     pub(crate) null_count: i64,
@@ -766,12 +766,14 @@ impl ArrowArray {
         Ok(ArrowArray { array, schema })
     }
 
-    /// creates a new [ArrowArray] from two pointers. Used to import from the C Data Interface.
+    /// creates a new [ArrowArray] from two Arc raw pointers. Used to import from the C Data Interface.
+    /// If the raw pointers are from `Box::into_raw`, or imported from other languages, e.g. Java,
+    /// use `try_from_box_raw` instead.
     /// # Safety
     /// See safety of [ArrowArray]
     /// # Error
     /// Errors if any of the pointers is null
-    pub unsafe fn try_from_raw(
+    pub unsafe fn try_from_arc_raw(
         array: *const FFI_ArrowArray,
         schema: *const FFI_ArrowSchema,
     ) -> Result<Self> {
@@ -781,11 +783,31 @@ impl ArrowArray {
                     .to_string(),
             ));
         };
-        let ffi_array = (*array).clone();
-        let ffi_schema = (*schema).clone();
         Ok(Self {
-            array: Arc::new(ffi_array),
-            schema: Arc::new(ffi_schema),
+            array: Arc::from_raw(array),
+            schema: Arc::from_raw(schema),
+        })
+    }
+
+    /// creates a new [ArrowArray] from two Box raw pointers. Used to import from the C Data Interface.
+    /// If the raw pointers are from `Arc::into_raw`, use `try_from_arc_raw` instead.
+    /// # Safety
+    /// See safety of [ArrowArray]
+    /// # Error
+    /// Errors if any of the pointers is null
+    pub unsafe fn try_from_box_raw(
+        array: *const FFI_ArrowArray,
+        schema: *const FFI_ArrowSchema,
+    ) -> Result<Self> {
+        if array.is_null() || schema.is_null() {
+            return Err(ArrowError::MemoryError(
+                "At least one of the pointers passed to `try_from_raw` is null"
+                    .to_string(),
+            ));
+        };
+        Ok(Self {
+            array: Arc::from(Box::from_raw(array as *mut FFI_ArrowArray)),
+            schema: Arc::from(Box::from_raw(schema as *mut FFI_ArrowSchema)),
         })
     }
 

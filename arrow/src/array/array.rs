@@ -620,18 +620,35 @@ fn new_null_sized_array<T: ArrowPrimitiveType>(
     })
 }
 
-/// Creates a new array from two FFI pointers. Used to import arrays from the C Data Interface
+/// Creates a new array from two FFI Arc pointers. Used to import arrays from the C Data Interface
+/// If the raw pointers are from `Box::into_raw`, or imported from other languages, e.g. Java,
+/// use `make_array_from_box_raw` instead.
 /// # Safety
 /// Assumes that these pointers represent valid C Data Interfaces, both in memory
 /// representation and lifetime via the `release` mechanism.
-pub unsafe fn make_array_from_raw(
+pub unsafe fn make_array_from_arc_raw(
     array: *const ffi::FFI_ArrowArray,
     schema: *const ffi::FFI_ArrowSchema,
 ) -> Result<ArrayRef> {
-    let array = ffi::ArrowArray::try_from_raw(array, schema)?;
+    let array = ffi::ArrowArray::try_from_arc_raw(array, schema)?;
     let data = ArrayData::try_from(array)?;
     Ok(make_array(data))
 }
+
+/// Creates a new array from two FFI pointers. Used to import arrays from the C Data Interface
+/// If the raw pointers are from `Arc::into_raw`, use `make_array_from_arc_raw` instead.
+/// # Safety
+/// Assumes that these pointers represent valid C Data Interfaces, both in memory
+/// representation and lifetime via the `release` mechanism.
+pub unsafe fn make_array_from_box_raw(
+    array: *const ffi::FFI_ArrowArray,
+    schema: *const ffi::FFI_ArrowSchema,
+) -> Result<ArrayRef> {
+    let array = ffi::ArrowArray::try_from_box_raw(array, schema)?;
+    let data = ArrayData::try_from(array)?;
+    Ok(make_array(data))
+}
+
 // Helper function for printing potentially long arrays.
 pub(super) fn print_long_array<A, F>(
     array: &A,

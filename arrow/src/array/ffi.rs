@@ -67,7 +67,7 @@ mod tests {
         let (array, schema) = ArrowArray::into_raw(d1);
 
         // simulate an external consumer by being the consumer
-        let d1 = unsafe { ArrowArray::try_from_raw(array, schema) }?;
+        let d1 = unsafe { ArrowArray::try_from_arc_raw(array, schema) }?;
 
         let result = &ArrayData::try_from(d1)?;
 

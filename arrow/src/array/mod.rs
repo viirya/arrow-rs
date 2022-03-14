@@ -521,7 +521,8 @@ pub use self::cast::{
 
 // ------------------------------ C Data Interface ---------------------------
 
-pub use self::array::make_array_from_raw;
+pub use self::array::make_array_from_arc_raw;
+pub use self::array::make_array_from_box_raw;
 
 #[cfg(test)]
 mod tests {

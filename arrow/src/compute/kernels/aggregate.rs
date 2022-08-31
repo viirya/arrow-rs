@@ -36,7 +36,7 @@ pub(crate) fn is_nan<T: ArrowNativeType + PartialOrd + Copy>(a: T) -> bool {
 /// Returns the minimum value in the array, according to the natural order.
 /// For floating point arrays any NaN values are considered to be greater than any other non-null value
 #[cfg(not(feature = "simd"))]
-pub fn min<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn min_primitive<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: ArrowNativeType,
@@ -47,7 +47,7 @@ where
 /// Returns the maximum value in the array, according to the natural order.
 /// For floating point arrays any NaN values are considered to be greater than any other non-null value
 #[cfg(not(feature = "simd"))]
-pub fn max<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn max_primitive<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: ArrowNativeType,
@@ -185,7 +185,8 @@ pub fn min_string<T: OffsetSizeTrait>(array: &GenericStringArray<T>) -> Option<&
 }
 
 /// Returns the sum of values in the array.
-pub fn sum_array<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
+/// Returns `None` if the array is empty or only contains null values.
+pub fn sum<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: Add<Output = T::Native>,
@@ -211,12 +212,15 @@ where
 
             Some(sum)
         }
-        _ => sum::<T>(as_primitive_array(&array)),
+        _ => sum_primitive::<T>(as_primitive_array(&array)),
     }
 }
 
-/// Returns the min of values in the array.
-pub fn min_array<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
+/// Returns the min of values in the array, according to the natural order.
+/// Supported data types: numeric types, dictionary type with numeric type as value.
+///
+/// For floating point arrays any NaN values are considered to be greater than any other non-null value
+pub fn min<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: ArrowNativeType,
@@ -224,12 +228,15 @@ where
     min_max_array_helper::<T, A, _, _>(
         array,
         |a, b| (!is_nan(*a) & is_nan(*b)) || a < b,
-        min,
+        min_primitive,
     )
 }
 
-/// Returns the max of values in the array.
-pub fn max_array<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
+/// Returns the max of values in the array, according to the natural order.
+/// Supported data types: numeric types, dictionary type with numeric type as value.
+///
+/// For floating point arrays any NaN values are considered to be greater than any other non-null value
+pub fn max<T, A: ArrayAccessor<Item = T::Native>>(array: A) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: ArrowNativeType,
@@ -237,7 +244,7 @@ where
     min_max_array_helper::<T, A, _, _>(
         array,
         |a, b| (is_nan(*a) & !is_nan(*b)) || a > b,
-        max,
+        max_primitive,
     )
 }
 
@@ -281,7 +288,7 @@ where
 ///
 /// Returns `None` if the array is empty or only contains null values.
 #[cfg(not(feature = "simd"))]
-pub fn sum<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn sum_primitive<T>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T: ArrowNumericType,
     T::Native: Add<Output = T::Native>,
@@ -680,7 +687,7 @@ mod simd {
 ///
 /// Returns `None` if the array is empty or only contains null values.
 #[cfg(feature = "simd")]
-pub fn sum<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn sum_primitive<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T::Native: Add<Output = T::Native>,
 {
@@ -692,7 +699,7 @@ where
 #[cfg(feature = "simd")]
 /// Returns the minimum value in the array, according to the natural order.
 /// For floating point arrays any NaN values are considered to be greater than any other non-null value
-pub fn min<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn min_primitive<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T::Native: PartialOrd,
 {
@@ -704,7 +711,7 @@ where
 #[cfg(feature = "simd")]
 /// Returns the maximum value in the array, according to the natural order.
 /// For floating point arrays any NaN values are considered to be greater than any other non-null value
-pub fn max<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
+fn max_primitive<T: ArrowNumericType>(array: &PrimitiveArray<T>) -> Option<T::Native>
 where
     T::Native: PartialOrd,
 {
@@ -718,30 +725,32 @@ mod tests {
     use super::*;
     use crate::array::*;
     use crate::compute::add;
-    use crate::datatypes::{Float32Type, Int32Type, Int8Type};
+    use crate::datatypes::{
+        Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt8Type,
+    };
 
     #[test]
     fn test_primitive_array_sum() {
         let a = Int32Array::from(vec![1, 2, 3, 4, 5]);
-        assert_eq!(15, sum(&a).unwrap());
+        assert_eq!(15, sum::<Int32Type, _>(&a).unwrap());
     }
 
     #[test]
     fn test_primitive_array_float_sum() {
         let a = Float64Array::from(vec![1.1, 2.2, 3.3, 4.4, 5.5]);
-        assert_eq!(16.5, sum(&a).unwrap());
+        assert_eq!(16.5, sum::<Float64Type, _>(&a).unwrap());
     }
 
     #[test]
     fn test_primitive_array_sum_with_nulls() {
         let a = Int32Array::from(vec![None, Some(2), Some(3), None, Some(5)]);
-        assert_eq!(10, sum(&a).unwrap());
+        assert_eq!(10, sum::<Int32Type, _>(&a).unwrap());
     }
 
     #[test]
     fn test_primitive_array_sum_all_nulls() {
         let a = Int32Array::from(vec![None, None, None]);
-        assert_eq!(None, sum(&a));
+        assert_eq!(None, sum::<Int32Type, _>(&a));
     }
 
     #[test]
@@ -754,7 +763,10 @@ mod tests {
             .collect();
         // create an array that actually has non-zero values at the invalid indices
         let c = add(&a, &b).unwrap();
-        assert_eq!(Some((1..=100).filter(|i| i % 3 == 0).sum()), sum(&c));
+        assert_eq!(
+            Some((1..=100).filter(|i| i % 3 == 0).sum()),
+            sum::<Int64Type, _>(&c)
+        );
     }
 
     #[test]
@@ -767,7 +779,10 @@ mod tests {
             .collect();
         // create an array that actually has non-zero values at the invalid indices
         let c = add(&a, &b).unwrap();
-        assert_eq!(Some((1..=100).filter(|i| i % 3 == 0).sum()), sum(&c));
+        assert_eq!(
+            Some((1..=100).filter(|i| i % 3 == 0).sum()),
+            sum::<Int32Type, _>(&c)
+        );
     }
 
     #[test]
@@ -780,7 +795,10 @@ mod tests {
             .collect();
         // create an array that actually has non-zero values at the invalid indices
         let c = add(&a, &b).unwrap();
-        assert_eq!(Some((1..=100).filter(|i| i % 3 == 0).sum()), sum(&c));
+        assert_eq!(
+            Some((1..=100).filter(|i| i % 3 == 0).sum()),
+            sum::<Int16Type, _>(&c)
+        );
     }
 
     #[test]
@@ -794,44 +812,47 @@ mod tests {
             .collect();
         // create an array that actually has non-zero values at the invalid indices
         let c = add(&a, &b).unwrap();
-        assert_eq!(Some((1..=100).filter(|i| i % 33 == 0).sum()), sum(&c));
+        assert_eq!(
+            Some((1..=100).filter(|i| i % 33 == 0).sum()),
+            sum::<UInt8Type, _>(&c)
+        );
     }
 
     #[test]
     fn test_primitive_array_min_max() {
         let a = Int32Array::from(vec![5, 6, 7, 8, 9]);
-        assert_eq!(5, min(&a).unwrap());
-        assert_eq!(9, max(&a).unwrap());
+        assert_eq!(5, min::<Int32Type, _>(&a).unwrap());
+        assert_eq!(9, max::<Int32Type, _>(&a).unwrap());
     }
 
     #[test]
     fn test_primitive_array_min_max_with_nulls() {
         let a = Int32Array::from(vec![Some(5), None, None, Some(8), Some(9)]);
-        assert_eq!(5, min(&a).unwrap());
-        assert_eq!(9, max(&a).unwrap());
+        assert_eq!(5, min::<Int32Type, _>(&a).unwrap());
+        assert_eq!(9, max::<Int32Type, _>(&a).unwrap());
     }
 
     #[test]
     fn test_primitive_min_max_1() {
         let a = Int32Array::from(vec![None, None, Some(5), Some(2)]);
-        assert_eq!(Some(2), min(&a));
-        assert_eq!(Some(5), max(&a));
+        assert_eq!(Some(2), min::<Int32Type, _>(&a));
+        assert_eq!(Some(5), max::<Int32Type, _>(&a));
     }
 
     #[test]
     fn test_primitive_min_max_float_large_nonnull_array() {
         let a: Float64Array = (0..256).map(|i| Some((i + 1) as f64)).collect();
         // min/max are on boundaries of chunked data
-        assert_eq!(Some(1.0), min(&a));
-        assert_eq!(Some(256.0), max(&a));
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert_eq!(Some(256.0), max::<Float64Type, _>(&a));
 
         // max is last value in remainder after chunking
         let a: Float64Array = (0..255).map(|i| Some((i + 1) as f64)).collect();
-        assert_eq!(Some(255.0), max(&a));
+        assert_eq!(Some(255.0), max::<Float64Type, _>(&a));
 
         // max is first value in remainder after chunking
         let a: Float64Array = (0..257).map(|i| Some((i + 1) as f64)).collect();
-        assert_eq!(Some(257.0), max(&a));
+        assert_eq!(Some(257.0), max::<Float64Type, _>(&a));
     }
 
     #[test]
@@ -846,8 +867,8 @@ mod tests {
             })
             .collect();
         // min/max are on boundaries of chunked data
-        assert_eq!(Some(1.0), min(&a));
-        assert_eq!(Some(256.0), max(&a));
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert_eq!(Some(256.0), max::<Float64Type, _>(&a));
 
         let a: Float64Array = (0..256)
             .map(|i| {
@@ -859,49 +880,49 @@ mod tests {
             })
             .collect();
         // boundaries of chunked data are null
-        assert_eq!(Some(2.0), min(&a));
-        assert_eq!(Some(255.0), max(&a));
+        assert_eq!(Some(2.0), min::<Float64Type, _>(&a));
+        assert_eq!(Some(255.0), max::<Float64Type, _>(&a));
 
         let a: Float64Array = (0..256)
             .map(|i| if i != 100 { None } else { Some((i) as f64) })
             .collect();
         // a single non-null value somewhere in the middle
-        assert_eq!(Some(100.0), min(&a));
-        assert_eq!(Some(100.0), max(&a));
+        assert_eq!(Some(100.0), min::<Float64Type, _>(&a));
+        assert_eq!(Some(100.0), max::<Float64Type, _>(&a));
 
         // max is last value in remainder after chunking
         let a: Float64Array = (0..255).map(|i| Some((i + 1) as f64)).collect();
-        assert_eq!(Some(255.0), max(&a));
+        assert_eq!(Some(255.0), max::<Float64Type, _>(&a));
 
         // max is first value in remainder after chunking
         let a: Float64Array = (0..257).map(|i| Some((i + 1) as f64)).collect();
-        assert_eq!(Some(257.0), max(&a));
+        assert_eq!(Some(257.0), max::<Float64Type, _>(&a));
     }
 
     #[test]
     fn test_primitive_min_max_float_edge_cases() {
         let a: Float64Array = (0..100).map(|_| Some(f64::NEG_INFINITY)).collect();
-        assert_eq!(Some(f64::NEG_INFINITY), min(&a));
-        assert_eq!(Some(f64::NEG_INFINITY), max(&a));
+        assert_eq!(Some(f64::NEG_INFINITY), min::<Float64Type, _>(&a));
+        assert_eq!(Some(f64::NEG_INFINITY), max::<Float64Type, _>(&a));
 
         let a: Float64Array = (0..100).map(|_| Some(f64::MIN)).collect();
-        assert_eq!(Some(f64::MIN), min(&a));
-        assert_eq!(Some(f64::MIN), max(&a));
+        assert_eq!(Some(f64::MIN), min::<Float64Type, _>(&a));
+        assert_eq!(Some(f64::MIN), max::<Float64Type, _>(&a));
 
         let a: Float64Array = (0..100).map(|_| Some(f64::MAX)).collect();
-        assert_eq!(Some(f64::MAX), min(&a));
-        assert_eq!(Some(f64::MAX), max(&a));
+        assert_eq!(Some(f64::MAX), min::<Float64Type, _>(&a));
+        assert_eq!(Some(f64::MAX), max::<Float64Type, _>(&a));
 
         let a: Float64Array = (0..100).map(|_| Some(f64::INFINITY)).collect();
-        assert_eq!(Some(f64::INFINITY), min(&a));
-        assert_eq!(Some(f64::INFINITY), max(&a));
+        assert_eq!(Some(f64::INFINITY), min::<Float64Type, _>(&a));
+        assert_eq!(Some(f64::INFINITY), max::<Float64Type, _>(&a));
     }
 
     #[test]
     fn test_primitive_min_max_float_all_nans_non_null() {
         let a: Float64Array = (0..100).map(|_| Some(f64::NAN)).collect();
-        assert!(max(&a).unwrap().is_nan());
-        assert!(min(&a).unwrap().is_nan());
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
+        assert!(min::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -915,8 +936,8 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(Some(1.0), min(&a));
-        assert!(max(&a).unwrap().is_nan());
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -930,8 +951,8 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(Some(1.0), min(&a));
-        assert!(max(&a).unwrap().is_nan());
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -947,8 +968,8 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(Some(1.0), min(&a));
-        assert!(max(&a).unwrap().is_nan());
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -964,8 +985,8 @@ mod tests {
                 }
             })
             .collect();
-        assert_eq!(Some(1.0), min(&a));
-        assert!(max(&a).unwrap().is_nan());
+        assert_eq!(Some(1.0), min::<Float64Type, _>(&a));
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -983,8 +1004,8 @@ mod tests {
                 Some(x)
             })
             .collect();
-        assert_eq!(Some(f64::NEG_INFINITY), min(&a));
-        assert!(max(&a).unwrap().is_nan());
+        assert_eq!(Some(f64::NEG_INFINITY), min::<Float64Type, _>(&a));
+        assert!(max::<Float64Type, _>(&a).unwrap().is_nan());
     }
 
     #[test]
@@ -1105,20 +1126,20 @@ mod tests {
 
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(39, sum_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(39, sum::<Int8Type, _>(array).unwrap());
 
         let a = Int32Array::from(vec![1, 2, 3, 4, 5]);
-        assert_eq!(15, sum_array::<Int32Type, _>(&a).unwrap());
+        assert_eq!(15, sum::<Int32Type, _>(&a).unwrap());
 
         let keys = Int8Array::from(vec![Some(2_i8), None, Some(4)]);
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(26, sum_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(26, sum::<Int8Type, _>(array).unwrap());
 
         let keys = Int8Array::from(vec![None, None, None]);
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert!(sum_array::<Int8Type, _>(array).is_none());
+        assert!(sum::<Int8Type, _>(array).is_none());
     }
 
     #[test]
@@ -1128,28 +1149,28 @@ mod tests {
 
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(14, max_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(14, max::<Int8Type, _>(array).unwrap());
 
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(12, min_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(12, min::<Int8Type, _>(array).unwrap());
 
         let a = Int32Array::from(vec![1, 2, 3, 4, 5]);
-        assert_eq!(5, max_array::<Int32Type, _>(&a).unwrap());
-        assert_eq!(1, min_array::<Int32Type, _>(&a).unwrap());
+        assert_eq!(5, max::<Int32Type, _>(&a).unwrap());
+        assert_eq!(1, min::<Int32Type, _>(&a).unwrap());
 
         let keys = Int8Array::from(vec![Some(2_i8), None, Some(7)]);
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(17, max_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(17, max::<Int8Type, _>(array).unwrap());
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert_eq!(12, min_array::<Int8Type, _>(array).unwrap());
+        assert_eq!(12, min::<Int8Type, _>(array).unwrap());
 
         let keys = Int8Array::from(vec![None, None, None]);
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert!(max_array::<Int8Type, _>(array).is_none());
+        assert!(max::<Int8Type, _>(array).is_none());
         let array = dict_array.downcast_dict::<Int8Array>().unwrap();
-        assert!(min_array::<Int8Type, _>(array).is_none());
+        assert!(min::<Int8Type, _>(array).is_none());
     }
 
     #[test]
@@ -1159,9 +1180,9 @@ mod tests {
 
         let dict_array = DictionaryArray::try_new(&keys, &values).unwrap();
         let array = dict_array.downcast_dict::<Float32Array>().unwrap();
-        assert!(max_array::<Float32Type, _>(array).unwrap().is_nan());
+        assert!(max::<Float32Type, _>(array).unwrap().is_nan());
 
         let array = dict_array.downcast_dict::<Float32Array>().unwrap();
-        assert_eq!(2.0_f32, min_array::<Float32Type, _>(array).unwrap());
+        assert_eq!(2.0_f32, min::<Float32Type, _>(array).unwrap());
     }
 }

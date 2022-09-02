@@ -39,3 +39,6 @@ resolver = "2"
 # how it is compiled within the workspace, causing the whole workspace to be compiled from scratch
 # this way, this is a stand-alone package that compiles independently of the others.
 exclude = ["arrow-pyarrow-integration-testing"]
+
+[profile.release]
+overflow-checks = true

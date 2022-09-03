@@ -34,8 +34,9 @@ use crate::compute::kernels::arity::unary;
 use crate::compute::unary_dyn;
 use crate::compute::util::combine_option_bitmap;
 use crate::datatypes::{
-    ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type, Date64Type,
-    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalUnit, IntervalYearMonthType,
+    ArrowNativeTypeOp, ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type,
+    Date64Type, IntervalDayTimeType, IntervalMonthDayNanoType, IntervalUnit,
+    IntervalYearMonthType,
 };
 use crate::datatypes::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type,
@@ -204,6 +205,85 @@ where
                         Err(ArrowError::DivideByZero)
                     } else {
                         Ok(Some((self.op)(l, r)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect();
+
+        let values = values?;
+
+        Ok(PrimitiveArray::<LT>::from_iter(values))
+    }
+}
+
+/// A kernel for two primitive arrays
+struct PrimitiveOverflowCheckedKernel<
+    'a,
+    LT: ArrowNumericType,
+    RT: ArrowNumericType,
+    F: Fn(LT::Native, RT::Native) -> Option<LT::Native>,
+> {
+    left: &'a PrimitiveArray<LT>,
+    right: &'a PrimitiveArray<RT>,
+    op: F,
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> Option<LT::Native>,
+    > PrimitiveOverflowCheckedKernel<'a, LT, RT, F>
+where
+    LT::Native: ArrowNativeTypeOp,
+{
+    pub fn new(
+        left: &'a PrimitiveArray<LT>,
+        right: &'a PrimitiveArray<RT>,
+        op: F,
+    ) -> Self {
+        Self { left, right, op }
+    }
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> Option<LT::Native>,
+    > MathKernel for PrimitiveOverflowCheckedKernel<'a, LT, RT, F>
+{
+    type LEFT = &'a PrimitiveArray<LT>;
+    type RIGHT = &'a PrimitiveArray<RT>;
+    type RESULT = PrimitiveArray<LT>;
+    type OP = F;
+
+    fn compute_with_options(&self, _option: MathKernelOption) -> Result<Self::RESULT> {
+        let left = self.left;
+        let right = self.right;
+
+        if left.len() != right.len() {
+            return Err(ArrowError::ComputeError(
+                "Cannot perform math operation on arrays of different length".to_string(),
+            ));
+        }
+
+        let left_iter = ArrayIter::new(left);
+        let right_iter = ArrayIter::new(right);
+
+        let values: Result<Vec<Option<<LT as ArrowPrimitiveType>::Native>>> = left_iter
+            .into_iter()
+            .zip(right_iter.into_iter())
+            .map(|(l, r)| {
+                if let (Some(l), Some(r)) = (l, r) {
+                    let result = (self.op)(l, r);
+                    if let Some(r) = result {
+                        Ok(Some(r))
+                    } else {
+                        // Overflow
+                        Err(ArrowError::ComputeError("Overflow happened".to_string()))
                     }
                 } else {
                     Ok(None)
@@ -824,15 +904,37 @@ where
 
 /// Perform `left + right` operation on two arrays. If either left or right value is null
 /// then the result is also null.
+///
+/// This doesn't detect overflow. Once overflowing, the result will wrap around.
+/// For an overflow-checking variant, use `add_checked` instead.
 pub fn add<T>(
     left: &PrimitiveArray<T>,
     right: &PrimitiveArray<T>,
 ) -> Result<PrimitiveArray<T>>
 where
     T: ArrowNumericType,
-    T::Native: Add<Output = T::Native>,
+    T::Native: ArrowNativeTypeOp,
 {
-    let kernel = PrimitiveKernel::new(left, right, |a, b| a + b);
+    let kernel = PrimitiveKernel::new(left, right, |a, b| a.wrapping_add_if_applied(b));
+    MathKernel::compute(&kernel)
+}
+
+/// Perform `left + right` operation on two arrays. If either left or right value is null
+/// then the result is also null. Once
+///
+/// This detects overflow and returns an `Err` for that. For an non-overflow-checking variant,
+/// use `add` instead.
+pub fn add_checked<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: ArrowNativeTypeOp,
+{
+    let kernel = PrimitiveOverflowCheckedKernel::new(left, right, |a, b| {
+        a.checked_add_if_applied(b)
+    });
     MathKernel::compute(&kernel)
 }
 
@@ -940,7 +1042,8 @@ where
     T: datatypes::ArrowNumericType,
     T::Native: Sub<Output = T::Native>,
 {
-    math_op(left, right, |a, b| a - b)
+    let kernel = PrimitiveKernel::new(left, right, |a, b| a - b);
+    MathKernel::compute(&kernel)
 }
 
 /// Perform `left - right` operation on two arrays. If either left or right value is null
@@ -1028,7 +1131,8 @@ where
     T: datatypes::ArrowNumericType,
     T::Native: Mul<Output = T::Native>,
 {
-    math_op(left, right, |a, b| a * b)
+    let kernel = PrimitiveKernel::new(left, right, |a, b| a * b);
+    MathKernel::compute(&kernel)
 }
 
 /// Perform `left * right` operation on two arrays. If either left or right value is null
@@ -2134,5 +2238,18 @@ mod tests {
         let actual = powf_scalar(&a, 2.0).unwrap();
         let expected = Float64Array::from(vec![Some(1.0), None, Some(9.0)]);
         assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_primitive_add_wrapping_overflow() {
+        let a = Int32Array::from(vec![i32::MAX, i32::MIN]);
+        let b = Int32Array::from(vec![1, 1]);
+
+        let wrapped = add(&a, &b);
+        let expected = Int32Array::from(vec![-2147483648, -2147483647]);
+        assert_eq!(expected, wrapped.unwrap());
+
+        let overflow = add_checked(&a, &b);
+        overflow.expect_err("overflow should be detected");
     }
 }

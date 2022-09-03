@@ -33,23 +33,189 @@ use crate::buffer::MutableBuffer;
 use crate::compute::kernels::arity::unary;
 use crate::compute::unary_dyn;
 use crate::compute::util::combine_option_bitmap;
-use crate::datatypes;
 use crate::datatypes::{
-    ArrowNumericType, DataType, Date32Type, Date64Type, IntervalDayTimeType,
-    IntervalMonthDayNanoType, IntervalUnit, IntervalYearMonthType,
+    ArrowNumericType, ArrowPrimitiveType, DataType, Date32Type, Date64Type,
+    IntervalDayTimeType, IntervalMonthDayNanoType, IntervalUnit, IntervalYearMonthType,
 };
 use crate::datatypes::{
     Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type,
     UInt32Type, UInt64Type, UInt8Type,
 };
 use crate::error::{ArrowError, Result};
+use crate::{datatypes, downcast_primitive_array};
 use num::traits::Pow;
-use std::any::type_name;
 #[cfg(feature = "simd")]
 use std::borrow::BorrowMut;
 #[cfg(feature = "simd")]
 use std::slice::{ChunksExact, ChunksExactMut};
 use std::sync::Arc;
+
+enum MathKernelOption {
+    None,
+}
+
+/// A math kernel
+trait MathKernel {
+    type LEFT: ArrayAccessor;
+    type RIGHT: ArrayAccessor;
+    type RESULT: Array;
+    type OP;
+
+    fn compute(&self) -> Result<Self::RESULT> {
+        self.compute_with_options(MathKernelOption::None)
+    }
+
+    fn compute_with_options(&self, option: MathKernelOption) -> Result<Self::RESULT>;
+}
+
+/// A kernel for two primitive arrays
+struct PrimitiveKernel<
+    'a,
+    LT: ArrowNumericType,
+    RT: ArrowNumericType,
+    F: Fn(LT::Native, RT::Native) -> LT::Native,
+> {
+    left: &'a PrimitiveArray<LT>,
+    right: &'a PrimitiveArray<RT>,
+    op: F,
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> LT::Native,
+    > PrimitiveKernel<'a, LT, RT, F>
+{
+    pub fn new(
+        left: &'a PrimitiveArray<LT>,
+        right: &'a PrimitiveArray<RT>,
+        op: F,
+    ) -> Self {
+        Self { left, right, op }
+    }
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> LT::Native,
+    > MathKernel for PrimitiveKernel<'a, LT, RT, F>
+{
+    type LEFT = &'a PrimitiveArray<LT>;
+    type RIGHT = &'a PrimitiveArray<RT>;
+    type RESULT = PrimitiveArray<LT>;
+    type OP = F;
+
+    fn compute_with_options(&self, _option: MathKernelOption) -> Result<Self::RESULT> {
+        let left = self.left;
+        let right = self.right;
+
+        if left.len() != right.len() {
+            return Err(ArrowError::ComputeError(
+                "Cannot perform math operation on arrays of different length".to_string(),
+            ));
+        }
+
+        let left_iter = ArrayIter::new(left);
+        let right_iter = ArrayIter::new(right);
+
+        let values: Self::RESULT = left_iter
+            .into_iter()
+            .zip(right_iter.into_iter())
+            .map(|(l, r)| {
+                if let (Some(l), Some(r)) = (l, r) {
+                    Some((self.op)(l, r))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(values)
+    }
+}
+
+struct PrimitiveDivideCheckKernel<
+    'a,
+    LT: ArrowNumericType,
+    RT: ArrowNumericType,
+    F: Fn(LT::Native, RT::Native) -> LT::Native,
+> where
+    RT::Native: One + Zero,
+{
+    left: &'a PrimitiveArray<LT>,
+    right: &'a PrimitiveArray<RT>,
+    op: F,
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> LT::Native,
+    > PrimitiveDivideCheckKernel<'a, LT, RT, F>
+where
+    RT::Native: One + Zero,
+{
+    pub fn new(
+        left: &'a PrimitiveArray<LT>,
+        right: &'a PrimitiveArray<RT>,
+        op: F,
+    ) -> Self {
+        Self { left, right, op }
+    }
+}
+
+impl<
+        'a,
+        LT: ArrowNumericType,
+        RT: ArrowNumericType,
+        F: Fn(LT::Native, RT::Native) -> LT::Native,
+    > MathKernel for PrimitiveDivideCheckKernel<'a, LT, RT, F>
+where
+    RT::Native: One + Zero,
+{
+    type LEFT = &'a PrimitiveArray<LT>;
+    type RIGHT = &'a PrimitiveArray<RT>;
+    type RESULT = PrimitiveArray<LT>;
+    type OP = F;
+
+    fn compute_with_options(&self, _option: MathKernelOption) -> Result<Self::RESULT> {
+        let left = self.left;
+        let right = self.right;
+
+        if left.len() != right.len() {
+            return Err(ArrowError::ComputeError(
+                "Cannot perform math operation on arrays of different length".to_string(),
+            ));
+        }
+
+        let left_iter = ArrayIter::new(left);
+        let right_iter = ArrayIter::new(right);
+
+        let values: Result<Vec<Option<<LT as ArrowPrimitiveType>::Native>>> = left_iter
+            .into_iter()
+            .zip(right_iter.into_iter())
+            .map(|(l, r)| {
+                if let (Some(l), Some(r)) = (l, r) {
+                    if r.is_zero() {
+                        Err(ArrowError::DivideByZero)
+                    } else {
+                        Ok(Some((self.op)(l, r)))
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect();
+
+        let values = values?;
+
+        Ok(PrimitiveArray::<LT>::from_iter(values))
+    }
+}
 
 /// Helper function to perform math lambda function on values from two arrays. If either
 /// left or right value is null then the output value is also null, so `1 + null` is
@@ -101,42 +267,6 @@ where
         )
     };
     Ok(PrimitiveArray::<LT>::from(data))
-}
-
-/// Helper function for operations where a valid `0` on the right array should
-/// result in an [ArrowError::DivideByZero], namely the division and modulo operations
-///
-/// # Errors
-///
-/// This function errors if:
-/// * the arrays have different lengths
-/// * there is an element where both left and right values are valid and the right value is `0`
-fn math_checked_divide_op<T, F>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
-    op: F,
-) -> Result<PrimitiveArray<T>>
-where
-    T: ArrowNumericType,
-    T::Native: One + Zero,
-    F: Fn(T::Native, T::Native) -> T::Native,
-{
-    if left.len() != right.len() {
-        return Err(ArrowError::ComputeError(
-            "Cannot perform math operation on arrays of different length".to_string(),
-        ));
-    }
-
-    let null_bit_buffer =
-        combine_option_bitmap(&[left.data_ref(), right.data_ref()], left.len())?;
-
-    math_checked_divide_op_on_iters(
-        left.into_iter(),
-        right.into_iter(),
-        op,
-        left.len(),
-        null_bit_buffer,
-    )
 }
 
 /// Helper function for operations where a valid `0` on the right array should
@@ -570,72 +700,6 @@ macro_rules! typed_dict_math_op {
     }};
 }
 
-macro_rules! typed_op {
-    ($LEFT: expr, $RIGHT: expr, $T: ident, $OP: expr, $MATH_OP: ident) => {{
-        let left = $LEFT
-            .as_any()
-            .downcast_ref::<PrimitiveArray<$T>>()
-            .ok_or_else(|| {
-                ArrowError::CastError(format!(
-                    "Left array cannot be cast to {}",
-                    type_name::<$T>()
-                ))
-            })?;
-        let right = $RIGHT
-            .as_any()
-            .downcast_ref::<PrimitiveArray<$T>>()
-            .ok_or_else(|| {
-                ArrowError::CastError(format!(
-                    "Right array cannot be cast to {}",
-                    type_name::<$T>(),
-                ))
-            })?;
-        let array = $MATH_OP(left, right, $OP)?;
-        Ok(Arc::new(array))
-    }};
-}
-
-macro_rules! typed_math_op {
-    ($LEFT: expr, $RIGHT: expr, $OP: expr, $MATH_OP: ident) => {{
-        match $LEFT.data_type() {
-            DataType::Int8 => {
-                typed_op!($LEFT, $RIGHT, Int8Type, $OP, $MATH_OP)
-            }
-            DataType::Int16 => {
-                typed_op!($LEFT, $RIGHT, Int16Type, $OP, $MATH_OP)
-            }
-            DataType::Int32 => {
-                typed_op!($LEFT, $RIGHT, Int32Type, $OP, $MATH_OP)
-            }
-            DataType::Int64 => {
-                typed_op!($LEFT, $RIGHT, Int64Type, $OP, $MATH_OP)
-            }
-            DataType::UInt8 => {
-                typed_op!($LEFT, $RIGHT, UInt8Type, $OP, $MATH_OP)
-            }
-            DataType::UInt16 => {
-                typed_op!($LEFT, $RIGHT, UInt16Type, $OP, $MATH_OP)
-            }
-            DataType::UInt32 => {
-                typed_op!($LEFT, $RIGHT, UInt32Type, $OP, $MATH_OP)
-            }
-            DataType::UInt64 => {
-                typed_op!($LEFT, $RIGHT, UInt64Type, $OP, $MATH_OP)
-            }
-            DataType::Float32 => {
-                typed_op!($LEFT, $RIGHT, Float32Type, $OP, $MATH_OP)
-            }
-            DataType::Float64 => {
-                typed_op!($LEFT, $RIGHT, Float64Type, $OP, $MATH_OP)
-            }
-            t => Err(ArrowError::CastError(format!(
-                "Cannot perform arithmetic operation on arrays of type {}",
-                t
-            ))),
-        }
-    }};
-}
-
 /// Helper function to perform math lambda function on values from two dictionary arrays, this
 /// version does not attempt to use SIMD explicitly (though the compiler may auto vectorize)
 macro_rules! math_dict_op {
@@ -768,7 +832,8 @@ where
     T: ArrowNumericType,
     T::Native: Add<Output = T::Native>,
 {
-    math_op(left, right, |a, b| a + b)
+    let kernel = PrimitiveKernel::new(left, right, |a, b| a + b);
+    MathKernel::compute(&kernel)
 }
 
 /// Perform `left + right` operation on two arrays. If either left or right value is null
@@ -826,7 +891,18 @@ pub fn add_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
                 ))),
             }
         }
-        _ => typed_math_op!(left, right, |a, b| a + b, math_op),
+        _ => {
+            downcast_primitive_array!(
+                (left, right) => {
+                    let kernel = PrimitiveKernel::new(left, right, |a, b| a + b);
+                    MathKernel::compute(&kernel).map(|a| Arc::new(a) as ArrayRef)
+                }
+                _ => Err(ArrowError::CastError(format!(
+                    "Unsupported data type {}, {}",
+                    left.data_type(), right.data_type()
+                )))
+            )
+        }
     }
 }
 
@@ -874,7 +950,18 @@ pub fn subtract_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
         DataType::Dictionary(_, _) => {
             typed_dict_math_op!(left, right, |a, b| a - b, math_op_dict)
         }
-        _ => typed_math_op!(left, right, |a, b| a - b, math_op),
+        _ => {
+            downcast_primitive_array!(
+                (left, right) => {
+                    let kernel = PrimitiveKernel::new(left, right, |a, b| a - b);
+                    MathKernel::compute(&kernel).map(|a| Arc::new(a) as ArrayRef)
+                }
+                _ => Err(ArrowError::CastError(format!(
+                    "Unsupported data type {}, {}",
+                    left.data_type(), right.data_type()
+                )))
+            )
+        }
     }
 }
 
@@ -951,7 +1038,18 @@ pub fn multiply_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
         DataType::Dictionary(_, _) => {
             typed_dict_math_op!(left, right, |a, b| a * b, math_op_dict)
         }
-        _ => typed_math_op!(left, right, |a, b| a * b, math_op),
+        _ => {
+            downcast_primitive_array!(
+                (left, right) => {
+                    let kernel = PrimitiveKernel::new(left, right, |a, b| a * b);
+                    MathKernel::compute(&kernel).map(|a| Arc::new(a) as ArrayRef)
+                }
+                _ => Err(ArrowError::CastError(format!(
+                    "Unsupported data type {}, {}",
+                    left.data_type(), right.data_type()
+                )))
+            )
+        }
     }
 }
 
@@ -1007,7 +1105,10 @@ where
         a % b
     });
     #[cfg(not(feature = "simd"))]
-    return math_checked_divide_op(left, right, |a, b| a % b);
+    {
+        let kernel = PrimitiveDivideCheckKernel::new(left, right, |a, b| a % b);
+        MathKernel::compute(&kernel)
+    }
 }
 
 /// Perform `left / right` operation on two arrays. If either left or right value is null
@@ -1024,7 +1125,10 @@ where
     #[cfg(feature = "simd")]
     return simd_checked_divide_op(&left, &right, simd_checked_divide::<T>, |a, b| a / b);
     #[cfg(not(feature = "simd"))]
-    return math_checked_divide_op(left, right, |a, b| a / b);
+    {
+        let kernel = PrimitiveDivideCheckKernel::new(left, right, |a, b| a / b);
+        MathKernel::compute(&kernel)
+    }
 }
 
 /// Perform `left / right` operation on two arrays. If either left or right value is null
@@ -1035,7 +1139,18 @@ pub fn divide_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
         DataType::Dictionary(_, _) => {
             typed_dict_math_op!(left, right, |a, b| a / b, math_divide_checked_op_dict)
         }
-        _ => typed_math_op!(left, right, |a, b| a / b, math_checked_divide_op),
+        _ => {
+            downcast_primitive_array!(
+                (left, right) => {
+                    let kernel = PrimitiveDivideCheckKernel::new(left, right, |a, b| a / b);
+                    MathKernel::compute(&kernel).map(|a| Arc::new(a) as ArrayRef)
+                }
+                _ => Err(ArrowError::CastError(format!(
+                    "Unsupported data type {}, {}",
+                    left.data_type(), right.data_type()
+                )))
+            )
+        }
     }
 }
 
@@ -1050,7 +1165,8 @@ where
     T: datatypes::ArrowFloatNumericType,
     T::Native: Div<Output = T::Native>,
 {
-    math_op(left, right, |a, b| a / b)
+    let kernel = PrimitiveKernel::new(left, right, |a, b| a / b);
+    MathKernel::compute(&kernel)
 }
 
 /// Modulus every value in an array by a scalar. If any value in the array is null then the

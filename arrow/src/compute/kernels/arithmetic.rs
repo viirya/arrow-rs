@@ -32,7 +32,7 @@ use crate::buffer::Buffer;
 use crate::buffer::MutableBuffer;
 use crate::compute::kernels::arity::unary;
 use crate::compute::util::combine_option_bitmap;
-use crate::compute::{binary, try_binary, unary_dyn};
+use crate::compute::{binary, binary_opt, try_binary, unary_dyn};
 use crate::datatypes::{
     native_op::ArrowNativeTypeOp, ArrowNumericType, DataType, Date32Type, Date64Type,
     IntervalDayTimeType, IntervalMonthDayNanoType, IntervalUnit, IntervalYearMonthType,
@@ -711,7 +711,7 @@ where
 }
 
 /// Perform `left + right` operation on two arrays. If either left or right value is null
-/// then the result is also null. Once
+/// then the result is also null.
 ///
 /// This detects overflow and returns an `Err` for that. For an non-overflow-checking variant,
 /// use `add` instead.
@@ -724,6 +724,21 @@ where
     T::Native: ArrowNativeTypeOp,
 {
     math_checked_op(left, right, |a, b| a.add_checked(b))
+}
+
+/// Perform `left + right` operation on two arrays. If either left or right value is null
+/// then the result is also null.
+///
+/// If an overflow happens, the overflowing value will be replaced with null in the result.
+pub fn add_opt<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: ArrowNativeTypeOp,
+{
+    Ok(binary_opt(left, right, |a, b| a.add_checked(b)))
 }
 
 /// Perform `left + right` operation on two arrays. If either left or right value is null
@@ -853,6 +868,21 @@ where
 
 /// Perform `left - right` operation on two arrays. If either left or right value is null
 /// then the result is also null.
+///
+/// If an overflow happens, the overflowing value will be replaced with null in the result.
+pub fn subtract_opt<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: ArrowNativeTypeOp,
+{
+    Ok(binary_opt(left, right, |a, b| a.sub_checked(b)))
+}
+
+/// Perform `left - right` operation on two arrays. If either left or right value is null
+/// then the result is also null.
 pub fn subtract_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
     match left.data_type() {
         DataType::Dictionary(_, _) => {
@@ -959,6 +989,21 @@ where
 
 /// Perform `left * right` operation on two arrays. If either left or right value is null
 /// then the result is also null.
+///
+/// If an overflow happens, the overflowing value will be replaced with null in the result.
+pub fn multiply_opt<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: ArrowNativeTypeOp,
+{
+    Ok(binary_opt(left, right, |a, b| a.mul_checked(b)))
+}
+
+/// Perform `left * right` operation on two arrays. If either left or right value is null
+/// then the result is also null.
 pub fn multiply_dyn(left: &dyn Array, right: &dyn Array) -> Result<ArrayRef> {
     match left.data_type() {
         DataType::Dictionary(_, _) => {
@@ -1051,6 +1096,28 @@ where
     return simd_checked_divide_op(&left, &right, simd_checked_divide::<T>, |a, b| a / b);
     #[cfg(not(feature = "simd"))]
     return math_checked_divide_op(left, right, |a, b| a.div_checked(b));
+}
+
+/// Perform `left / right` operation on two arrays. If either left or right value is null
+/// then the result is also null.
+///
+/// If any right hand value is zero, or an overflow happens, the operation value will be
+/// replaced with null in the result.
+pub fn divide_opt<T>(
+    left: &PrimitiveArray<T>,
+    right: &PrimitiveArray<T>,
+) -> Result<PrimitiveArray<T>>
+where
+    T: ArrowNumericType,
+    T::Native: ArrowNativeTypeOp + Zero + One,
+{
+    Ok(binary_opt(left, right, |a, b| {
+        if b.is_zero() {
+            None
+        } else {
+            a.div_checked(b)
+        }
+    }))
 }
 
 /// Perform `left / right` operation on two arrays. If either left or right value is null
@@ -2093,5 +2160,61 @@ mod tests {
 
         let overflow = divide_checked(&a, &b);
         overflow.expect_err("overflow should be detected");
+    }
+
+    #[test]
+    fn test_primitive_add_opt_overflow() {
+        let a = Int32Array::from(vec![i32::MAX, i32::MIN]);
+        let b = Int32Array::from(vec![1, 1]);
+
+        let wrapped = add(&a, &b);
+        let expected = Int32Array::from(vec![-2147483648, -2147483647]);
+        assert_eq!(expected, wrapped.unwrap());
+
+        let overflow = add_opt(&a, &b);
+        let expected = Int32Array::from(vec![None, Some(-2147483647)]);
+        assert_eq!(expected, overflow.unwrap());
+    }
+
+    #[test]
+    fn test_primitive_subtract_opt_overflow() {
+        let a = Int32Array::from(vec![-2]);
+        let b = Int32Array::from(vec![i32::MAX]);
+
+        let wrapped = subtract(&a, &b);
+        let expected = Int32Array::from(vec![i32::MAX]);
+        assert_eq!(expected, wrapped.unwrap());
+
+        let overflow = subtract_opt(&a, &b);
+        let expected = Int32Array::from(vec![None]);
+        assert_eq!(expected, overflow.unwrap());
+    }
+
+    #[test]
+    fn test_primitive_mul_opt_overflow() {
+        let a = Int32Array::from(vec![10]);
+        let b = Int32Array::from(vec![i32::MAX]);
+
+        let wrapped = multiply(&a, &b);
+        let expected = Int32Array::from(vec![-10]);
+        assert_eq!(expected, wrapped.unwrap());
+
+        let overflow = multiply_opt(&a, &b);
+        let expected = Int32Array::from(vec![None]);
+        assert_eq!(expected, overflow.unwrap());
+    }
+
+    #[test]
+    fn test_primitive_div_opt_overflow() {
+        let a = Int32Array::from(vec![i32::MIN]);
+        let b = Int32Array::from(vec![-1]);
+
+        let wrapped = divide(&a, &b);
+        let expected = Int32Array::from(vec![-2147483648]);
+        assert_eq!(expected, wrapped.unwrap());
+
+        let overflow = divide_opt(&a, &b);
+        let expected = Int32Array::from(vec![None]);
+        assert_eq!(expected, overflow.unwrap());
     }
 }

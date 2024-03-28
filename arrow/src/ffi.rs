@@ -362,9 +362,36 @@ impl<'a> ImportedArrowArray<'a> {
                         // an empty buffer.
                         Ok(MutableBuffer::new(0).into())
                     }
-                    None => Err(ArrowError::CDataInterface(format!(
-                        "The external buffer at position {index} is null."
-                    ))),
+                    None => {
+                        // Special handling for dictionary type as we only care about the key type in the case.
+                        let data_type = match &self.data_type {
+                            DataType::Dictionary(key_data_type, _) => key_data_type.as_ref(),
+                            dt => dt,
+                        };
+                        match (&data_type, index) {
+                            (DataType::Utf8, 1)
+                            | (DataType::LargeUtf8, 1)
+                            | (DataType::Binary, 1)
+                            | (DataType::LargeBinary, 1)
+                            | (DataType::List(_), 1)
+                            | (DataType::LargeList(_), 1)
+                            | (DataType::Map(_, _), 1) => {
+                                // Null offset buffer, which is invalid. With empty offseted-layout
+                                // arrays, it should be a buffer with a single `zero` value. Java Arrow
+                                // C Data Interface has the bug `https://github.com/apache/arrow/issues/40038`.
+                                // Before it is fixed, we need to handle this case as a workaround.
+                                let bits = bit_width(data_type, index)?;
+                                let mut buf = MutableBuffer::new(bits / 8);
+                                for _ in 0..bits / 8 {
+                                    buf.push(0u8);
+                                }
+                                Ok(buf.into())
+                            }
+                            _ => Err(ArrowError::CDataInterface(format!(
+                                "The external buffer at position {index} is null."
+                            ))),
+                        }
+                    }
                 }
             })
             .collect()
@@ -402,6 +429,14 @@ impl<'a> ImportedArrowArray<'a> {
             (DataType::Utf8, 2) | (DataType::Binary, 2) => {
                 // the len of the data buffer (buffer 2) equals the last value of the offset buffer (buffer 1)
                 let len = self.buffer_len(1, dt)?;
+
+                // Empty offset buffer, which is invalid. With empty offseted-layout
+                // arrays, it should be a buffer with a single `zero` value. Java Arrow
+                // C Data Interface has the bug. Before it is fixed, we need to handle this case as a workaround.
+                if NonNull::new(self.array.buffer(1) as *mut i32).is_none() {
+                    return Ok(0);
+                }
+
                 // first buffer is the null buffer => add(1)
                 // we assume that pointer is aligned for `i32`, as Utf8 uses `i32` offsets.
                 #[allow(clippy::cast_ptr_alignment)]
@@ -412,6 +447,14 @@ impl<'a> ImportedArrowArray<'a> {
             (DataType::LargeUtf8, 2) | (DataType::LargeBinary, 2) => {
                 // the len of the data buffer (buffer 2) equals the last value of the offset buffer (buffer 1)
                 let len = self.buffer_len(1, dt)?;
+
+                // Empty offset buffer, which is invalid. With empty offseted-layout
+                // arrays, it should be a buffer with a single `zero` value. Java Arrow
+                // C Data Interface has the bug. Before it is fixed, we need to handle this case as a workaround.
+                if NonNull::new(self.array.buffer(1) as *mut i32).is_none() {
+                    return Ok(0);
+                }
+
                 // first buffer is the null buffer => add(1)
                 // we assume that pointer is aligned for `i64`, as Large uses `i64` offsets.
                 #[allow(clippy::cast_ptr_alignment)]

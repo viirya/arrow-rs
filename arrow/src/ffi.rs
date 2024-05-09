@@ -388,7 +388,7 @@ impl<'a> ImportedArrowArray<'a> {
                                 Ok(buf.into())
                             }
                             _ => Err(ArrowError::CDataInterface(format!(
-                                "The external buffer at position {index} is null."
+                                "The external buffer with len = {len} at position {index} is null."
                             ))),
                         }
                     }

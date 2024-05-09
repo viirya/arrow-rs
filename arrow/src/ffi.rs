@@ -362,36 +362,9 @@ impl<'a> ImportedArrowArray<'a> {
                         // an empty buffer.
                         Ok(MutableBuffer::new(0).into())
                     }
-                    None => {
-                        // Special handling for dictionary type as we only care about the key type in the case.
-                        let data_type = match &self.data_type {
-                            DataType::Dictionary(key_data_type, _) => key_data_type.as_ref(),
-                            dt => dt,
-                        };
-                        match (&data_type, index) {
-                            (DataType::Utf8, 1)
-                            | (DataType::LargeUtf8, 1)
-                            | (DataType::Binary, 1)
-                            | (DataType::LargeBinary, 1)
-                            | (DataType::List(_), 1)
-                            | (DataType::LargeList(_), 1)
-                            | (DataType::Map(_, _), 1) => {
-                                // Null offset buffer, which is invalid. With empty offseted-layout
-                                // arrays, it should be a buffer with a single `zero` value. Java Arrow
-                                // C Data Interface has the bug `https://github.com/apache/arrow/issues/40038`.
-                                // Before it is fixed, we need to handle this case as a workaround.
-                                let bits = bit_width(data_type, index)?;
-                                let mut buf = MutableBuffer::new(bits / 8);
-                                for _ in 0..bits / 8 {
-                                    buf.push(0u8);
-                                }
-                                Ok(buf.into())
-                            }
-                            _ => Err(ArrowError::CDataInterface(format!(
-                                "The external buffer with len = {len} at position {index} is null."
-                            ))),
-                        }
-                    }
+                    None => Err(ArrowError::CDataInterface(format!(
+                        "The external buffer with len = {len} at position {index} is null."
+                    ))),
                 }
             })
             .collect()

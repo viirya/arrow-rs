@@ -427,7 +427,8 @@ impl<'a> ImportedArrowArray<'a> {
                 (length + 1) * (bits / 8)
             }
             (DataType::Utf8, 2) | (DataType::Binary, 2) => {
-                // the len of the data buffer (buffer 2) equals the last value of the offset buffer (buffer 1)
+                // the len of the data buffer (buffer 2) equals the difference between the last value
+                // and the first value of the offset buffer (buffer 1).
                 let len = self.buffer_len(1, dt)?;
 
                 // Empty offset buffer, which is invalid. With empty offseted-layout
@@ -448,7 +449,8 @@ impl<'a> ImportedArrowArray<'a> {
                 end - start
             }
             (DataType::LargeUtf8, 2) | (DataType::LargeBinary, 2) => {
-                // the len of the data buffer (buffer 2) equals the last value of the offset buffer (buffer 1)
+                // the len of the data buffer (buffer 2) equals the difference between the last value
+                // and the first value of the offset buffer (buffer 1).
                 let len = self.buffer_len(1, dt)?;
 
                 // Empty offset buffer, which is invalid. With empty offseted-layout

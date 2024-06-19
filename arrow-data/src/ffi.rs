@@ -141,6 +141,11 @@ impl FFI_ArrowArray {
                 // the `FFI_ArrowArray` offset field.
                 Some(unsafe {
                     let b = &data.buffers()[0];
+                    println!(
+                        "Buffer capacity: {}, offset: {}",
+                        b.capacity(),
+                        b.ptr_offset()
+                    );
                     b.ptr_offset() / std::mem::size_of::<i32>()
                 })
             }
@@ -168,6 +173,8 @@ impl FFI_ArrowArray {
             data.offset()
         };
 
+        println!("FFI_ArrowArray offset: {}", offset);
+
         // `n_buffers` is the number of buffers by the spec.
         let n_buffers = {
             data_layout.buffers.len() + {
@@ -177,6 +184,12 @@ impl FFI_ArrowArray {
                 usize::from(data_layout.can_contain_null_mask)
             }
         } as i64;
+
+        let offset_buffer_pos = if data_layout.can_contain_null_mask {
+            1
+        } else {
+            0
+        };
 
         let buffers_ptr = buffers
             .iter()
@@ -189,8 +202,8 @@ impl FFI_ArrowArray {
                             | DataType::LargeUtf8
                             | DataType::Binary
                             | DataType::LargeBinary,
-                            1,
-                        ) => {
+                            pos,
+                        ) if pos == offset_buffer_pos => {
                             // For offset buffer, take original pointer without offset.
                             // Buffer offset should be handled by `FFI_ArrowArray` offset field.
                             Some(b.data_ptr().as_ptr() as *const c_void)

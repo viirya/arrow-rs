@@ -441,7 +441,11 @@ impl<'a> ImportedArrowArray<'a> {
                 // a slice of string from arrow-rs to Java Arrow and then export it to arrow-rs again.
                 // So we add this hack to always take full length of data buffer by assuming the first offset
                 // is always 0 which is true for Arrow Java and arrow-rs.
-                end
+                if end == start {
+                    0
+                } else {
+                    end
+                }
             }
             (DataType::LargeUtf8, 2) | (DataType::LargeBinary, 2) => {
                 // the len of the data buffer (buffer 2) equals the difference between the last value
@@ -460,7 +464,11 @@ impl<'a> ImportedArrowArray<'a> {
                 // a slice of string from arrow-rs to Java Arrow and then export it to arrow-rs again.
                 // So we add this hack to always take full length of data buffer by assuming the first offset
                 // is always 0 which is true for Arrow Java and arrow-rs.
-                end
+                if end == start {
+                    0
+                } else {
+                    end
+                }
             }
             // buffer len of primitive types
             _ => {

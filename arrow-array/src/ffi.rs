@@ -455,7 +455,12 @@ impl<'a> ImportedArrowArray<'a> {
                 let start = (unsafe { *offset_buffer.add(0) }) as usize;
                 // get last offset
                 let end = (unsafe { *offset_buffer.add(len / size_of::<i64>() - 1) }) as usize;
-                end - start
+                // HACK: For the issue https://github.com/apache/datafusion-comet/issues/540
+                // As Arrow Java doesn't support `offset` in C Data interface, we cannot correctly import
+                // a slice of string from arrow-rs to Java Arrow and then export it to arrow-rs again.
+                // So we add this hack to always take full length of data buffer by assuming the first offset
+                // is always 0 which is true for Arrow Java and arrow-rs.
+                end
             }
             // buffer len of primitive types
             _ => {

@@ -190,6 +190,7 @@ fn take_impl<IndexType: ArrowPrimitiveType>(
     values: &dyn Array,
     indices: &PrimitiveArray<IndexType>,
 ) -> Result<ArrayRef, ArrowError> {
+    println!("take_impl values: {:?}", values);
     downcast_primitive_array! {
         values => Ok(Arc::new(take_primitive(values, indices)?)),
         DataType::Boolean => {
@@ -474,14 +475,17 @@ fn take_bytes<T: ByteArrayType, IndexType: ArrowPrimitiveType>(
         }));
         nulls = None
     } else if indices.null_count() == 0 {
+        println!("take_bytes");
         let num_bytes = bit_util::ceil(data_len, 8);
 
         let mut null_buf = MutableBuffer::new(num_bytes).with_bitset(num_bytes, true);
         let null_slice = null_buf.as_slice_mut();
         offsets.extend(indices.values().iter().enumerate().map(|(i, index)| {
             let index = index.as_usize();
+            println!("index: {}", index);
             if array.is_valid(index) {
                 let s: &[u8] = array.value(index).as_ref();
+                println!("s: {:?}", s);
                 values.extend_from_slice(s.as_ref());
             } else {
                 bit_util::unset_bit(null_slice, i);

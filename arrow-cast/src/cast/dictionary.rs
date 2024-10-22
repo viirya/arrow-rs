@@ -169,6 +169,7 @@ pub(crate) fn unpack_dictionary<K>(
 where
     K: ArrowDictionaryKeyType,
 {
+    println!("unpack_dictionary");
     let dict_array = array.as_dictionary::<K>();
     let cast_dict_values = cast_with_options(dict_array.values(), to_type, cast_options)?;
     take(cast_dict_values.as_ref(), dict_array.keys(), None)

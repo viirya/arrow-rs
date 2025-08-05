@@ -1402,6 +1402,9 @@ impl<R: Read> StreamReader<R> {
             i32::from_le_bytes(meta_size)
         };
 
+        let meta_len = usize::try_from(meta_len)
+            .map_err(|_| ArrowError::ParseError(format!("Invalid metadata length: {meta_len}")))?;
+
         let mut meta_buffer = vec![0; meta_len as usize];
         reader.read_exact(&mut meta_buffer)?;
 
@@ -1483,6 +1486,9 @@ impl<R: Read> StreamReader<R> {
             }
             i32::from_le_bytes(meta_size)
         };
+
+        let meta_len = usize::try_from(meta_len)
+            .map_err(|_| ArrowError::ParseError(format!("Invalid metadata length: {meta_len}")))?;
 
         if meta_len == 0 {
             // the stream has ended, mark the reader as finished
@@ -2870,5 +2876,57 @@ mod tests {
         let new_schema = fb_to_schema(ipc_schema);
 
         assert_eq!(schema, new_schema);
+    }
+
+    fn create_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::empty());
+        let options = RecordBatchOptions::new()
+            .with_match_field_names(true)
+            .with_row_count(Some(10));
+        RecordBatch::try_new_with_options(schema, vec![], &options).unwrap()
+    }
+
+    fn produce_ipc_buffer() -> Vec<u8> {
+        let rb = create_batch();
+        let mut buf = vec![];
+        let mut writer = crate::writer::StreamWriter::try_new(&mut buf, rb.schema_ref()).unwrap();
+        writer.write(&rb).unwrap();
+        writer.finish().unwrap();
+        buf
+    }
+
+    #[test]
+    fn test_invalid_message() {
+        let bytes = i32::to_le_bytes(-1);
+        let mut buf = vec![];
+        buf.extend(CONTINUATION_MARKER);
+        buf.extend(bytes);
+
+        let reader_err = StreamReader::try_new(std::io::Cursor::new(buf), None).err();
+        assert!(reader_err.is_some());
+        assert_eq!(
+            reader_err.unwrap().to_string(),
+            "Parser error: Invalid metadata length: -1"
+        );
+    }
+
+    #[test]
+    fn test_invalid_next_message() {
+        let mut buf = produce_ipc_buffer();
+        let bytes = i32::to_le_bytes(-1);
+        buf.splice(buf.len() - 4..buf.len(), CONTINUATION_MARKER);
+        buf.extend(bytes);
+
+        let mut reader = StreamReader::try_new(std::io::Cursor::new(buf), None).unwrap();
+        let first_batch = reader.maybe_next().expect("cannot read first batch").unwrap();
+
+        assert_eq!(first_batch.num_rows(), 10);
+
+        let batch_err = reader.maybe_next().err();
+        assert!(batch_err.is_some());
+        assert_eq!(
+            batch_err.unwrap().to_string(),
+            "Parser error: Invalid metadata length: -1"
+        );
     }
 }
